@@ -172,6 +172,13 @@
           </button>
         </header>
         <div id="chat-history" class="chat-history"></div>
+        <div class="chat-input-bar">
+          <textarea id="text-input" class="chat-text-input" rows="1"
+            placeholder="输入文字与助手对话，Enter 发送（Shift+Enter 换行）"></textarea>
+          <button id="text-send" class="icon-btn chat-send-btn" title="发送" aria-label="发送文字">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          </button>
+        </div>
       </div>
     </div>
 
@@ -289,6 +296,15 @@
               <small id="audio-output-hint">
                 Where assistant audio plays. Chrome/Edge support switching outputs.
               </small>
+            </label>
+
+            <label class="field" id="volume-field">
+              <span class="field-head">
+                Assistant volume
+                <output id="volume-value" class="field-value">100%</output>
+              </span>
+              <input id="volume-slider" type="range" min="0" max="200" step="5" value="100" />
+              <small>Playback gain for the assistant's voice (50%–200%).</small>
             </label>
 
             <!-- WS-only: the gate runs in the WebSocket capture worklet; the

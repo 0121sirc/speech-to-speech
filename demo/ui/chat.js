@@ -529,6 +529,19 @@ export class ChatView {
   }
 
   /**
+   * Render a typed user message (from the text input) in the chat view.
+   * @param {string} text
+   */
+  onUserTextSent(text) {
+    if (DEBUG) console.debug(`[ui] user text: ${JSON.stringify(text)}`);
+    this._activeUserBubble = this._spawnBubble("user", text);
+    this._activeUserItemId = `_t${++this._anonSeq}`;
+    this._appendHistMsg("user", text, false);
+    this._bumpDismiss(this._activeUserBubble);
+    this._markUnread();
+  }
+
+  /**
    * Attach the browser-local recording to its user turn. This also creates an
    * audio-only row when STT is disabled and no transcript events arrive.
    * Speculative continuations can reuse an incomplete item ID; their

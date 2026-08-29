@@ -39,6 +39,7 @@ class AudioPlaybackProcessor extends AudioWorkletProcessor {
     this._fadeIn = 0;
     this._fadeOut = 0;
     this._lastSample = 0;
+    this._volume = 1.0;
 
     this.port.onmessage = (e) => {
       const data = e.data;
@@ -48,6 +49,11 @@ class AudioPlaybackProcessor extends AudioWorkletProcessor {
           if (typeof data.inputRate === "number" && data.inputRate > 0) {
             this._inputRate = data.inputRate;
             this._stepRatio = this._inputRate / sampleRate;
+          }
+          break;
+        case "setVolume":
+          if (typeof data.volume === "number") {
+            this._volume = Math.max(0, Math.min(3, data.volume));
           }
           break;
         case "audio":
@@ -152,8 +158,8 @@ class AudioPlaybackProcessor extends AudioWorkletProcessor {
         this._totalPlayed += 1;
       }
 
-      out[i] = sample;
-      if (stereo) stereo[i] = sample;
+      out[i] = sample * this._volume;
+      if (stereo) stereo[i] = sample * this._volume;
     }
 
     this._framesSinceStats += out.length;
