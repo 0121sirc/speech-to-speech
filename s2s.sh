@@ -3,12 +3,12 @@
 # All config via command-line arguments (no env vars required).
 set -euo pipefail
 
-S2S_HOME="${S2S_HOME:-/media/kg/DEV4T/s2s}"
+export S2S_HOME="${S2S_HOME:-/media/kg/DEV4T/s2s}"
 
 MODE="web"
 API_URL=""
 API_KEY=""
-MODEL="qwen3.5-4b"
+MODEL="qwen3.5-4b-uncensored-hauhaucs-aggressive"
 HOST="0.0.0.0"
 PORT=8765
 WEB_PORT=7860
@@ -29,11 +29,11 @@ Options:
                     web   = realtime backend + browser UI on :WEB_PORT
                     local = microphone + speakers on this machine
   --model NAME    LLM model name
-                  (default: qwen3.5-4b)
+                  (default: qwen3.5-4b-uncensored-hauhaucs-aggressive)
   --host HOST     realtime server bind host (web mode, default 0.0.0.0)
   --port PORT     realtime server port (default 8765)
   --web-port P    browser UI port (default 7860)
-  --no-proxy      do not use the http/https proxy set in activate.sh
+  --no-proxy      do not set the http/https proxy (default proxy: 127.0.0.1:7897)
   -h, --help      show this help
 
 Examples:
@@ -63,11 +63,24 @@ if [[ -z "$API_URL" || -z "$API_KEY" ]]; then
   exit 2
 fi
 
-# Environment: PATH, CUDA13 libs, HF/proxy, model caches
-source "$S2S_HOME/activate.sh"
-if [[ "$USE_PROXY" == "0" ]]; then
-  unset http_proxy https_proxy
+# ── Environment (was activate.sh) ───────────────────────────────────────────
+# PATH: use the conda env's python/tools
+export PATH="$S2S_HOME/.conda_env/bin:$PATH"
+# CUDA 13 runtime libs required by qwentts-cpp (libcudart.so.13 / libcublas.so.13)
+# plus env lib dir for libportaudio (sounddevice) and other bundled system libs
+export LD_LIBRARY_PATH="$S2S_HOME/.conda_env/lib/python3.12/site-packages/nvidia/cu13/lib:$S2S_HOME/.conda_env/lib:${LD_LIBRARY_PATH:-}"
+# model / cache inside the project dir
+export HF_HOME="$S2S_HOME/hf_cache"
+export HF_HUB_CACHE="$S2S_HOME/hf_cache/hub"
+export HF_ENDPOINT=https://huggingface.co
+export MODELSCOPE_CACHE="$S2S_HOME/modelscope_cache"
+# proxy for downloads (skip when --no-proxy)
+if [[ "$USE_PROXY" == "1" ]]; then
+  export http_proxy=http://127.0.0.1:7897/
+  export https_proxy=http://127.0.0.1:7897/
 fi
+
+echo "s2s env ready: $(which python)"
 
 COMMON=(
   --thresh 0.5 --min_speech_ms 300 --min_silence_ms 400
