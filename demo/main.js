@@ -229,8 +229,8 @@ const settingsBtn = $("#settings-btn");
 /** @type {HTMLDialogElement} */
 const settingsModal = $("#settings-modal");
 
-/** @type {HTMLButtonElement} */
-const aboutBtn = $("#about-btn");
+/** @type {HTMLButtonElement | null} */
+const aboutBtn = document.getElementById("about-btn");
 /** @type {HTMLDialogElement} */
 const aboutModal = $("#about-modal");
 /** @type {HTMLButtonElement} */
