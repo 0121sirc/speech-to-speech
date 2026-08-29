@@ -98,6 +98,7 @@ export class S2sRealtimeClient extends EventTarget {
     this._micSrc = null;
     this._captureNode = null;
     this._playbackNode = null;
+    this._desiredVolume = 1;
     this._micAnalyser = null;
     this._outAnalyser = null;
     this._remoteSrc = null;
@@ -304,6 +305,7 @@ export class S2sRealtimeClient extends EventTarget {
       this._playbackNode = playback;
       this._outAnalyser = output;
       this._visualiser = new OrbVisualiser(micAnalyser, output, () => this._aiSpeaking);
+      this.setPlaybackVolume(this._desiredVolume);
       this._visualiser.start();
     }
     await this.setAudioOutputDevice(this.options.audioOutputId || "");
@@ -550,6 +552,30 @@ export class S2sRealtimeClient extends EventTarget {
     if (!this._session) return;
     this._agent = this._buildAgent();
     void this._session.updateAgent(this._agent);
+  }
+
+  /**
+   * Send a typed text turn and trigger a model response.
+   * @param {string} text
+   */
+  sendText(text) {
+    const trimmed = String(text ?? "").trim();
+    if (!trimmed || !this._session || this._status === "connecting" || this._status === "closed") return;
+    if (this._status === "connected") this._setStatus("processing");
+    this._session.sendMessage(trimmed);
+    this.dispatchEvent(new CustomEvent("user-text-sent", { detail: { text: trimmed } }));
+  }
+
+  /**
+   * Set assistant playback volume (0..3, default 1).
+   * @param {number} volume
+   */
+  setPlaybackVolume(volume) {
+    const v = Math.max(0, Math.min(3, Number(volume) || 0));
+    this._desiredVolume = v;
+    if (this._playbackNode) {
+      this._playbackNode.port.postMessage({ kind: "setVolume", volume: v });
+    }
   }
 
   /** @param {ToolDef[]} tools */

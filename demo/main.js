@@ -39,6 +39,7 @@ const STORAGE_KEYS = {
   transport: "s2s.transport",
   audioInputId: "s2s.audio.inputId",
   audioOutputId: "s2s.audio.outputId",
+  volume: "s2s.audio.volume",
 };
 
 // ── Noise gate ──────────────────────────────────────────────────────────────
@@ -116,7 +117,17 @@ function loadSettings() {
     transport: localStorage.getItem(STORAGE_KEYS.transport) === "webrtc" ? "webrtc" : "ws",
     audioInputId: localStorage.getItem(STORAGE_KEYS.audioInputId) || "",
     audioOutputId: localStorage.getItem(STORAGE_KEYS.audioOutputId) || "",
+    volume: loadVolume(),
   };
+}
+
+/** Assistant playback volume in percent (0–200). Default 100. */
+function loadVolume() {
+  const stored = localStorage.getItem(STORAGE_KEYS.volume);
+  if (stored === null || stored === "") return 100;
+  const raw = Number(stored);
+  if (!Number.isFinite(raw)) return 100;
+  return Math.min(200, Math.max(0, Math.round(raw)));
 }
 
 /** Stored gate threshold (dBFS), clamped to the slider range. Defaults to a
@@ -141,6 +152,7 @@ function saveSettings(s) {
   localStorage.setItem(STORAGE_KEYS.transport, s.transport);
   localStorage.setItem(STORAGE_KEYS.audioInputId, s.audioInputId || "");
   localStorage.setItem(STORAGE_KEYS.audioOutputId, s.audioOutputId || "");
+  localStorage.setItem(STORAGE_KEYS.volume, String(s.volume));
 }
 
 /** @returns {{ web_search: boolean, camera_snapshot: boolean }} */
@@ -273,6 +285,10 @@ const audioOutputHint = $("#audio-output-hint");
 const inputInstructions = $("#instructions");
 /** @type {HTMLInputElement} */
 const inputNoiseGate = $("#noise-gate");
+/** @type {HTMLInputElement} */
+const inputVolume = $("#volume-slider");
+/** @type {HTMLElement} */
+const volumeValue = $("#volume-value");
 /** @type {HTMLElement} */
 const gateValue = $("#gate-value");
 /** @type {HTMLElement} */
@@ -293,6 +309,16 @@ const settingsForm = /** @type {HTMLFormElement} */ (settingsModal.querySelector
 /** @type {AppState} */
 let currentState = "idle";
 let settings = loadSettings();
+
+// ── Assistant volume ─────────────────────────────────────────────────────────
+inputVolume.value = String(settings.volume);
+volumeValue.textContent = `${settings.volume}%`;
+inputVolume.addEventListener("input", () => {
+  settings.volume = Number(inputVolume.value) || 0;
+  volumeValue.textContent = `${settings.volume}%`;
+  if (client) client.setPlaybackVolume(settings.volume / 100);
+  saveSettings(settings);
+});
 
 // ── Connection target ────────────────────────────────────────────────────────
 // Three modes, decided by the deploy via /api/config:
@@ -1434,6 +1460,7 @@ async function doStart(audioContext = null) {
       });
   client = c;
   c.setMuted(micMuted || userAudioReplaying);
+  c.setPlaybackVolume(settings.volume / 100);
 
   c.addEventListener("queue", (e) => {
     const { position, queueId } = /** @type {CustomEvent<{ position: number; queueId: string }>} */ (e).detail;
@@ -1462,6 +1489,10 @@ async function doStart(audioContext = null) {
   c.addEventListener("transcript", (e) => {
     const d = /** @type {CustomEvent<{ role: "user" | "assistant"; text: string; partial: boolean; itemId?: string; responseId?: string }>} */ (e).detail;
     chat.onTranscript(d);
+  });
+  c.addEventListener("user-text-sent", (e) => {
+    const d = /** @type {CustomEvent<{ text: string }>} */ (e).detail;
+    chat.onUserTextSent(d.text);
   });
   c.addEventListener("user-turn-started", (e) => {
     const detail = /** @type {CustomEvent<{ itemId?: string }>} */ (e).detail;
@@ -1508,6 +1539,37 @@ async function doStart(audioContext = null) {
   c.addEventListener("input-level", (e) => {
     const { rms } = /** @type {CustomEvent<{ rms: number }>} */ (e).detail;
     paintInputLevel(rms);
+  });
+
+  // ── Text input (typed messages) ───────────────────────────────────────────
+  const textInput = $("#text-input");
+  const textSend = $("#text-send");
+  const setTextInputEnabled = (enabled) => {
+    textInput.disabled = !enabled;
+    textSend.disabled = !enabled;
+  };
+  setTextInputEnabled(false);
+  const sendTextMessage = () => {
+    const text = (textInput.value || "").trim();
+    if (!text || !client) return;
+    client.sendText(text);
+    textInput.value = "";
+    textInput.style.height = "auto";
+  };
+  textSend.addEventListener("click", sendTextMessage);
+  textInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendTextMessage();
+    }
+  });
+  textInput.addEventListener("input", () => {
+    textInput.style.height = "auto";
+    textInput.style.height = `${Math.min(textInput.scrollHeight, 120)}px`;
+  });
+  c.addEventListener("status", (e) => {
+    const status = /** @type {CustomEvent<{ status: string }>} */ (e).detail.status;
+    setTextInputEnabled(status === "connected" || status === "processing" || status === "ai-speaking" || status === "user-speaking");
   });
 
   try {
