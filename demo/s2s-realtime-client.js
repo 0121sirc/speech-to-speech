@@ -567,11 +567,12 @@ export class S2sRealtimeClient extends EventTarget {
   }
 
   /**
-   * Set assistant playback volume (0..3, default 1).
+   * Set assistant playback volume (0..4, default 1).
    * @param {number} volume
    */
   setPlaybackVolume(volume) {
-    const v = Math.max(0, Math.min(3, Number(volume) || 0));
+    const n = Number(volume);
+    const v = Number.isFinite(n) ? Math.max(0, Math.min(4, n)) : this._desiredVolume;
     this._desiredVolume = v;
     if (this._playbackNode) {
       this._playbackNode.port.postMessage({ kind: "setVolume", volume: v });

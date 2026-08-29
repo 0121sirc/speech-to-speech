@@ -1878,15 +1878,15 @@ body.cam-on .footer {
 .chat-text-input {
   flex: 1;
   resize: none;
-  min-height: 38px;
-  max-height: 120px;
-  padding: 8px 12px;
+  min-height: 76px;
+  max-height: 240px;
+  padding: 10px 14px;
   border-radius: 8px;
   border: 1px solid var(--border-strong);
   background: var(--bg-input, rgba(0,0,0,0.25));
   color: var(--text-primary);
   font: inherit;
-  line-height: 1.4;
+  line-height: 1.5;
   outline: none;
 }
 .chat-text-input:focus { border-color: var(--accent, #6ea8fe); }

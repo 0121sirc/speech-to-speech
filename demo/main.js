@@ -121,13 +121,13 @@ function loadSettings() {
   };
 }
 
-/** Assistant playback volume in percent (0–200). Default 100. */
+/** Assistant playback volume in percent (0–300). Default 100. */
 function loadVolume() {
   const stored = localStorage.getItem(STORAGE_KEYS.volume);
   if (stored === null || stored === "") return 100;
   const raw = Number(stored);
   if (!Number.isFinite(raw)) return 100;
-  return Math.min(200, Math.max(0, Math.round(raw)));
+  return Math.min(300, Math.max(0, Math.round(raw)));
 }
 
 /** Stored gate threshold (dBFS), clamped to the slider range. Defaults to a
@@ -620,7 +620,7 @@ settingsBtn.addEventListener("click", openSettings);
 
 // About panel: native <dialog>, Esc closes for free; also close on the X and
 // on a click in the backdrop (a click whose target is the dialog itself).
-aboutBtn.addEventListener("click", () => aboutModal.showModal());
+if (aboutBtn) aboutBtn.addEventListener("click", () => aboutModal.showModal());
 // Mobile twin of the (i), living in the right-hand control cluster.
 $("#about-btn-m").addEventListener("click", () => aboutModal.showModal());
 aboutClose.addEventListener("click", () => aboutModal.close());
@@ -1565,7 +1565,7 @@ async function doStart(audioContext = null) {
   });
   textInput.addEventListener("input", () => {
     textInput.style.height = "auto";
-    textInput.style.height = `${Math.min(textInput.scrollHeight, 120)}px`;
+    textInput.style.height = `${Math.min(textInput.scrollHeight, 240)}px`;
   });
   c.addEventListener("status", (e) => {
     const status = /** @type {CustomEvent<{ status: string }>} */ (e).detail.status;

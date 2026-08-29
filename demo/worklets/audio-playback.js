@@ -53,7 +53,7 @@ class AudioPlaybackProcessor extends AudioWorkletProcessor {
           break;
         case "setVolume":
           if (typeof data.volume === "number") {
-            this._volume = Math.max(0, Math.min(3, data.volume));
+            this._volume = Math.max(0, Math.min(4, data.volume));
           }
           break;
         case "audio":
