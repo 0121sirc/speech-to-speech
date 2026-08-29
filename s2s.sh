@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Unified launcher for the local voice assistant.
-# All config via command-line arguments (no env vars required).
+# Usage: s2s.sh [start [OPTIONS]] | stop
 set -euo pipefail
 
 export S2S_HOME="${S2S_HOME:-/media/kg/DEV4T/s2s}"
@@ -16,12 +16,17 @@ USE_PROXY=1
 
 usage() {
   cat <<'EOF'
-Usage: s2s.sh [OPTIONS]
+Usage: s2s.sh [start [OPTIONS]] | stop
 
 Unified launcher for the local voice assistant
 (Silero VAD -> Paraformer STT(zh) -> OpenAI-compatible LLM -> Qwen3-TTS).
 
-Options:
+Commands:
+  start [OPTIONS]   Start the assistant (default when the first arg is an option)
+  stop              Gracefully stop any running s2s services
+                    (TERM -> wait -> KILL fallback, then verify ports)
+
+Options (for start):
   --api-url URL   LLM OpenAI-compatible endpoint (required)
                   e.g. http://100.120.234.5:1234/v1/
   --api-key KEY   LLM API key (required)
@@ -37,10 +42,78 @@ Options:
   -h, --help      show this help
 
 Examples:
-  ./s2s.sh --api-url http://100.120.234.5:1234/v1/ --api-key 1234
+  ./s2s.sh start --api-url http://100.120.234.5:1234/v1/ --api-key 1234
   ./s2s.sh --mode local --api-url http://100.120.234.5:1234/v1/ --api-key 1234
+  ./s2s.sh stop
 EOF
 }
+
+# Gracefully stop all running s2s services (backend + web UI + launcher).
+# Discovery uses specific patterns so this `stop` run never kills itself.
+stop_services() {
+  local stop_timeout="${STOP_TIMEOUT:-20}"
+  local pids alive pid rc=0 ports deadline
+
+  pids="$(pgrep -f "speech-to-speech (serve|local)" 2>/dev/null || true)
+$(pgrep -f "uvicorn --app-dir .*demo server:app" 2>/dev/null || true)
+$(pgrep -f "s2s\.sh .*--api-url" 2>/dev/null || true)"
+  pids="$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un | tr '\n' ' ')"
+
+  if [[ -z "${pids// /}" ]]; then
+    echo "No running s2s services found."
+    return 0
+  fi
+
+  echo "Stopping s2s services: $(echo $pids)"
+  for pid in $pids; do
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+
+  deadline=$((SECONDS + stop_timeout))
+  while (( SECONDS < deadline )); do
+    alive=""
+    for pid in $pids; do
+      kill -0 "$pid" 2>/dev/null && alive="$alive $pid"
+    done
+    [[ -z "$alive" ]] && break
+    sleep 1
+  done
+
+  for pid in $pids; do
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "  force killing $pid"
+      kill -9 "$pid" 2>/dev/null || true
+      rc=1
+    fi
+  done
+
+  if command -v ss >/dev/null 2>&1; then
+    ports="$(ss -tln 2>/dev/null | grep -E ':(8765|7860)\b' || true)"
+  else
+    ports="$(netstat -tln 2>/dev/null | grep -E ':(8765|7860)\b' || true)"
+  fi
+  if [[ -n "$ports" ]]; then
+    echo "Warning: ports 8765/7860 still in use:"
+    echo "$ports"
+    return 1
+  fi
+
+  echo "All s2s services stopped; ports 8765/7860 released."
+  return "$rc"
+}
+
+# ── Subcommand dispatch ─────────────────────────────────────────────────────
+if [[ "${1:-}" == "stop" ]]; then
+  stop_services || exit $?
+  exit 0
+fi
+if [[ "${1:-}" == "start" ]]; then
+  shift
+fi
+if [[ $# -eq 0 ]]; then
+  usage
+  exit 0
+fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
