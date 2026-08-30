@@ -354,8 +354,13 @@ let activeTransport = "ws";
 
 // ── Tool state ──────────────────────────────────────────────────────────────
 let toolsEnabled = loadTools();
-// Whether the server holds a Serper key (learned from /api/config on load).
+// Whether the server provides web search server-side (keyless Bing; learned from
+// /api/config `search` on load). True for every local deploy.
 let serverSearchKey = false;
+// Whether the server holds a Serper key (/api/config `searchKey`). When set,
+// Serper is used and the browser key field is locked; otherwise search runs
+// keyless via Bing, with the user's key as an optional override.
+let serverSerperKey = false;
 // A user-supplied key (fallback when the deploy has none). localStorage only.
 let userSearchKey = localStorage.getItem(STORAGE_KEYS.searchKey) || "";
 /** @type {MediaStream | null} */
@@ -638,19 +643,19 @@ function syncToolsUi() {
   toolWebRow.classList.toggle("disabled", !avail);
   toolCamSwitch.checked = toolsEnabled.camera_snapshot;
 
-  if (serverSearchKey) {
+  if (serverSerperKey) {
     // Key lives server-side: show it as configured, never expose it.
     searchKeyInput.value = "";
     searchKeyInput.placeholder = "••••••••  · provided by the server";
     searchKeyInput.disabled = true;
-    toolWebHint.textContent = "Ready. The search key is held server-side and never sent to your browser.";
+    toolWebHint.textContent = "Ready. The server search key is held server-side and never sent to your browser.";
   } else {
     searchKeyInput.disabled = false;
     searchKeyInput.value = userSearchKey;
-    searchKeyInput.placeholder = "Paste a Serper key to enable web search";
+    searchKeyInput.placeholder = "Optional: Serper key (default is Bing)";
     toolWebHint.textContent = userSearchKey
-      ? "Using your key — stored in this browser only."
-      : "No server key configured. Add your own Serper key to enable web search.";
+      ? "Using your key — otherwise web search runs keyless via Bing."
+      : "Web search works out of the box (Bing). Optionally paste a Serper key to override.";
   }
 }
 
@@ -696,7 +701,7 @@ toolCamSwitch.addEventListener("change", async () => {
 });
 
 searchKeyInput.addEventListener("input", () => {
-  if (serverSearchKey) return;
+  if (serverSerperKey) return;
   userSearchKey = searchKeyInput.value.trim();
   if (userSearchKey) localStorage.setItem(STORAGE_KEYS.searchKey, userSearchKey);
   else localStorage.removeItem(STORAGE_KEYS.searchKey);
@@ -704,7 +709,8 @@ searchKeyInput.addEventListener("input", () => {
   const avail = searchAvailable();
   toolWebSwitch.disabled = !avail;
   toolWebRow.classList.toggle("disabled", !avail);
-  // Losing the key disables a previously-enabled tool.
+  // Losing the key disables a previously-enabled tool (only matters when the
+  // deploy offers no server-side search at all).
   if (!avail && toolsEnabled.web_search) {
     toolsEnabled.web_search = false;
     toolWebSwitch.checked = false;
@@ -712,8 +718,8 @@ searchKeyInput.addEventListener("input", () => {
     pushToolsToSession();
   }
   toolWebHint.textContent = userSearchKey
-    ? "Using your key — stored in this browser only."
-    : "No server key configured. Add your own Serper key to enable web search.";
+    ? "Using your key — otherwise web search runs keyless via Bing."
+    : "Web search works out of the box (Bing). Optionally paste a Serper key to override.";
 });
 
 // ── Camera ──────────────────────────────────────────────────────────────────
@@ -884,8 +890,9 @@ async function execWebSearch(query) {
   if (!query) return "No query provided.";
   /** @type {Record<string, string>} */
   const body = { query };
-  // Only send a user key when there's no server key (server prefers its own).
-  if (!serverSearchKey && userSearchKey) body.key = userSearchKey;
+  // Only send a user key when the server holds no Serper key (server prefers
+  // its own). With no key at all the server searches keyless via Bing.
+  if (!serverSerperKey && userSearchKey) body.key = userSearchKey;
 
   const res = await fetch("api/search", {
     method: "POST",
@@ -902,7 +909,7 @@ async function execWebSearch(query) {
   // rather than its (older) training knowledge.
   const today = new Date().toISOString().slice(0, 10);
   /** @type {string[]} */
-  const lines = [`Google search result from ${today}:`];
+  const lines = [`Web search result from ${today}:`];
   if (json.answer) lines.push(`Answer: ${json.answer}`);
   for (const r of json.results || []) {
     lines.push(`- ${r.title}: ${r.snippet} (${r.url})`);
@@ -917,6 +924,7 @@ async function fetchConfig() {
     if (res.ok) {
       const json = await res.json();
       serverSearchKey = !!json.search;
+      serverSerperKey = !!json.searchKey;
       lbMode = !!json.lb;
       // Lock to LB mode only when the deploy reports a load balancer.
       allowDirect = json.allowDirect ?? !lbMode;

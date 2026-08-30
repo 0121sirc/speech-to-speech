@@ -2,10 +2,12 @@
 Tiny server for the speech-to-speech demo.
 
 The demo used to ship as a `sdk: static` Space, but the web-search tool needs a
-search key the browser must NOT see. A static Space has no runtime process, so it
-can't hold a secret the front-end uses. This server fixes that: it serves the
-unchanged front-end AND exposes a same-origin `/api/search` proxy that holds the
-Serper key server-side (see docs/adr/0001).
+search backend the browser must NOT talk to directly. A static Space has no
+runtime process, so it can't hold a secret or proxy anything. This server fixes
+that: it serves the unchanged front-end AND exposes a same-origin `/api/search`
+proxy. Search works out of the box by scraping Bing (no key, no registration);
+when a Serper key is configured — or a user supplies one — it uses Serper instead
+(see docs/adr/0001).
 
 Everything lives in one container; the speech-to-speech backend stays a separate,
 load-balanced service the browser talks to over WebSocket as before. The load
@@ -23,9 +25,9 @@ disabled entirely (no session proxy, no queue, no metering, no sign-in) and the
 browser connects directly to that URL, shown read-only in Settings.
 
 Endpoints:
-  GET  /api/config           -> { search, lb, allowDirect, s2sUrl, rtc, iceServers, auth }
+  GET  /api/config           -> { search, searchKey, lb, allowDirect, s2sUrl, rtc, iceServers, auth }
   GET  /api/me               -> login + tier + remaining budget (LB mode only)
-  POST /api/search           -> { results, answer }  Google via Serper.dev
+  POST /api/search           -> { results, answer }  Bing (keyless) or Google via Serper.dev
   POST /api/calls            -> proxies the WebRTC SDP offer to <s2s>/v1/realtime/calls
   POST /api/session          -> proxies <LB>/session: a grant, or a queue ticket
   GET  /api/queue/{id}       -> proxies <LB>/queue/{id}: position, or a grant on claim
@@ -42,9 +44,11 @@ the moment a slot is actually claimed (a grant), never while queued.
 """
 
 import asyncio
+import html as html_lib
 import json
 import logging
 import os
+import re
 from urllib.parse import urlsplit, urlunsplit
 
 import auth
@@ -129,8 +133,141 @@ def _webrtc_calls_url(s2s_url: str) -> str:
 
 
 SERPER_URL = "https://google.serper.dev/search"
+# Keyless fallback: Bing's HTML endpoint (no API key, no registration). The
+# Chinese endpoint is reachable directly from residential IPs (the main site is
+# not reliably reachable behind some networks).
+BING_URL = "https://cn.bing.com/search"
+BING_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
+# Each organic result is an <li class="b_algo"> block; the class may carry more
+# tokens (e.g. `b_algo b_rmb`), so match the leading prefix, not the exact token.
+BING_ALGO_RE = re.compile(r'<li class="b_algo[^"]*"', re.I)
 # Cap results so the tool output stays small enough to feed back to the model.
 MAX_RESULTS = 5
+
+
+def _strip_tags(text: str) -> str:
+    """Drop HTML tags and unescape entities (titles/snippets from Bing)."""
+    return html_lib.unescape(re.sub(r"<[^>]+>", " ", text)).strip()
+
+
+async def _bing_search(query: str) -> dict:
+    """Keyless web search via Bing's HTML endpoint (cn.bing.com).
+
+    No API key, no registration — the default when no Serper key is available.
+    ``trust_env=False`` pins the connection to a direct route instead of
+    inheriting the proxy env vars s2s.sh exports (the proxy exit IP is fine for
+    Bing, but a direct residential route is the most reliable)."""
+    params = {"q": query, "setlang": "zh-hans", "mkt": "zh-CN", "count": MAX_RESULTS}
+    try:
+        async with httpx.AsyncClient(trust_env=False, timeout=12.0, follow_redirects=True) as http:
+            resp = await http.get(BING_URL, params=params, headers=BING_HEADERS)
+    except httpx.RequestError as exc:
+        logger.warning("Bing unreachable for %r: %s", query, exc)
+        raise HTTPException(status_code=502, detail="Search provider unreachable.")
+    if resp.status_code != 200:
+        logger.warning("Bing returned HTTP %d for %r", resp.status_code, query)
+        raise HTTPException(status_code=502, detail=f"Search provider error ({resp.status_code}).")
+
+    text = resp.text
+    starts = [m.start() for m in BING_ALGO_RE.finditer(text)]
+    results: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(text)
+        block = text[start:end]
+        link = re.search(r"<h2[^>]*>\s*<a[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>", block, re.S)
+        if not link:
+            link = re.search(r"<a[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>", block, re.S)
+        if not link:
+            continue
+        url = link.group(1)
+        title = _strip_tags(link.group(2))
+        if not url.startswith("http") or not title or url in seen:
+            continue
+        seen.add(url)
+        snippet = ""
+        snip = re.search(r"<p[^>]*>(.*?)</p>", block, re.S)
+        if snip:
+            snippet = _strip_tags(snip.group(1))
+        results.append({"title": title, "snippet": snippet, "url": url})
+        if len(results) >= MAX_RESULTS:
+            break
+
+    # Best-effort instant answer (b_ans card). Bounded by the next result block
+    # so nested/related content doesn't leak in; None when there's no card.
+    answer = None
+    ans_match = re.search(r'<div class="b_ans[^"]*"', text, re.I)
+    if ans_match:
+        chunk = text[ans_match.end():]
+        cut = len(chunk)
+        m = re.search(r"</ol>", chunk)
+        if m:
+            cut = min(cut, m.start())
+        m = BING_ALGO_RE.search(chunk)
+        if m:
+            cut = min(cut, m.start())
+        raw = _strip_tags(chunk[:cut])
+        if len(raw) > 300:
+            raw = raw[:300] + "…"
+        answer = raw or None
+
+    return {"query": query, "answer": answer, "results": results}
+
+
+async def _serper_search(query: str, key: str) -> dict:
+    """Google search via Serper.dev. The key stays on the server unless the
+    user brought their own (then theirs is used for this request only)."""
+    headers = {"X-API-KEY": key, "Content-Type": "application/json"}
+    payload = {"q": query, "num": MAX_RESULTS}
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as http:
+            resp = await http.post(SERPER_URL, headers=headers, json=payload)
+    except httpx.RequestError as exc:
+        logger.warning("Serper unreachable: %r", exc)
+        raise HTTPException(status_code=502, detail="Search provider unreachable.")
+
+    if resp.status_code != 200:
+        # Serper's error body carries the real reason (e.g. "Not enough
+        # credits") and contains no key, so it's safe to log and relay.
+        body = resp.text[:300]
+        logger.warning("Serper error %s: %s", resp.status_code, body)
+        msg = None
+        try:
+            msg = resp.json().get("message")
+        except Exception:
+            pass
+        detail = f"Search provider error ({resp.status_code})"
+        if msg:
+            detail += f": {msg}"
+        raise HTTPException(status_code=502, detail=detail)
+
+    data = resp.json()
+    results = []
+    for item in (data.get("organic") or [])[:MAX_RESULTS]:
+        results.append(
+            {
+                "title": item.get("title", ""),
+                "snippet": item.get("snippet", ""),
+                "url": item.get("link", ""),
+            }
+        )
+
+    # A direct answer when Google has one — saves the model a hop.
+    box = data.get("answerBox") or {}
+    answer = box.get("answer") or box.get("snippet") or None
+    if not answer:
+        kg = data.get("knowledgeGraph") or {}
+        answer = kg.get("description") or None
+
+    return {"query": query, "answer": answer, "results": results}
+
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 LB_USER_AGENT = "speech-to-speech-demo"
 
@@ -192,7 +329,10 @@ def config():
     whether HF sign-in is available, and whether the user may instead set a direct
     s2s server URL. The LB address itself is intentionally NOT included."""
     return {
-        "search": bool(SERPER_KEY),
+        # Web search always works: keyless Bing by default. `searchKey` tells
+        # the client whether the deploy prefers Serper (key held server-side).
+        "search": True,
+        "searchKey": bool(SERPER_KEY),
         "lb": bool(LOAD_BALANCER_URL),
         "allowDirect": not LOAD_BALANCER_URL,
         # Deploy-pinned direct s2s URL (empty when unset). Not a secret: the
@@ -235,60 +375,16 @@ async def me(request: Request):
 
 @app.post("/api/search")
 async def search(req: SearchRequest):
-    """Proxy a Google search via Serper.dev. The key stays on the server unless
-    the user brought their own (then theirs is used for this request only)."""
+    """Proxy a web search. Uses Serper.dev when a key is available (the server's,
+    or the user's — theirs for this request only); otherwise searches keyless via
+    Bing, so web search works with no configuration at all."""
     query = (req.query or "").strip()
     if not query:
         raise HTTPException(status_code=400, detail="Empty query.")
 
     key = (req.key or "").strip() or SERPER_KEY
-    if not key:
-        # No server key and the user didn't supply one — search is unavailable.
-        raise HTTPException(status_code=503, detail="Search is not configured.")
-
-    headers = {"X-API-KEY": key, "Content-Type": "application/json"}
-    payload = {"q": query, "num": MAX_RESULTS}
-    try:
-        async with httpx.AsyncClient(timeout=12.0) as http:
-            resp = await http.post(SERPER_URL, headers=headers, json=payload)
-    except httpx.RequestError as exc:
-        logger.warning("Serper unreachable: %r", exc)
-        raise HTTPException(status_code=502, detail="Search provider unreachable.")
-
-    if resp.status_code != 200:
-        # Serper's error body carries the real reason (e.g. "Not enough
-        # credits") and contains no key, so it's safe to log and relay.
-        body = resp.text[:300]
-        logger.warning("Serper error %s: %s", resp.status_code, body)
-        msg = None
-        try:
-            msg = resp.json().get("message")
-        except Exception:
-            pass
-        detail = f"Search provider error ({resp.status_code})"
-        if msg:
-            detail += f": {msg}"
-        raise HTTPException(status_code=502, detail=detail)
-
-    data = resp.json()
-    results = []
-    for item in (data.get("organic") or [])[:MAX_RESULTS]:
-        results.append(
-            {
-                "title": item.get("title", ""),
-                "snippet": item.get("snippet", ""),
-                "url": item.get("link", ""),
-            }
-        )
-
-    # A direct answer when Google has one — saves the model a hop.
-    box = data.get("answerBox") or {}
-    answer = box.get("answer") or box.get("snippet") or None
-    if not answer:
-        kg = data.get("knowledgeGraph") or {}
-        answer = kg.get("description") or None
-
-    return JSONResponse({"query": query, "answer": answer, "results": results})
+    data = await _serper_search(query, key) if key else await _bing_search(query)
+    return JSONResponse(data)
 
 
 @app.post("/api/calls")

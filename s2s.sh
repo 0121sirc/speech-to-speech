@@ -8,7 +8,7 @@ export S2S_HOME="${S2S_HOME:-/media/kg/DEV4T/s2s}"
 MODE="web"
 API_URL=""
 API_KEY=""
-MODEL="qwen3.5-4b-uncensored-hauhaucs-aggressive"
+MODEL="qwen3.5-4b"
 HOST="0.0.0.0"
 PORT=8765
 WEB_PORT=7860
@@ -34,7 +34,7 @@ Options (for start):
                     web   = realtime backend + browser UI on :WEB_PORT
                     local = microphone + speakers on this machine
   --model NAME    LLM model name
-                  (default: qwen3.5-4b-uncensored-hauhaucs-aggressive)
+                  (default: qwen3.5-4b)
   --host HOST     realtime server bind host (web mode, default 0.0.0.0)
   --port PORT     realtime server port (default 8765)
   --web-port P    browser UI port (default 7860)
