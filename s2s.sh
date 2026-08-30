@@ -13,6 +13,13 @@ HOST="0.0.0.0"
 PORT=8765
 WEB_PORT=7860
 USE_PROXY=1
+USE_SEARXNG=1
+
+# Self-hosted SearXNG (shared across projects; started on demand, left running
+# on `stop` so other consumers keep working).
+SEARXNG_HOME="${SEARXNG_HOME:-/media/kg/DEV4T/searxng}"
+SEARXNG_CONTAINER="s2s-searxng"
+SEARXNG_IMAGE="ghcr.nju.edu.cn/searxng/searxng:latest"
 
 usage() {
   cat <<'EOF'
@@ -39,6 +46,8 @@ Options (for start):
   --port PORT     realtime server port (default 8765)
   --web-port P    browser UI port (default 7860)
   --no-proxy      do not set the http/https proxy (default proxy: 127.0.0.1:7897)
+  --no-searxng    do not start the shared SearXNG container (web search then
+                  falls back to Bing scraping; default: started on :8888)
   -h, --help      show this help
 
 Examples:
@@ -125,6 +134,7 @@ while [[ $# -gt 0 ]]; do
     --port)      PORT="$2"; shift 2 ;;
     --web-port)  WEB_PORT="$2"; shift 2 ;;
     --no-proxy)  USE_PROXY=0; shift ;;
+    --no-searxng) USE_SEARXNG=0; shift ;;
     -h|--help)   usage; exit 0 ;;
     *) echo "ERROR: unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -155,6 +165,42 @@ fi
 
 echo "s2s env ready: $(which python)"
 
+# ── SearXNG (web-search backend, shared) ───────────────────────────────────
+# The demo's /api/search proxies to a local SearXNG JSON API by default and
+# falls back to a Bing scrape if it's down. Start/verify the container here so
+# web search works out of the box; `stop` intentionally leaves it running since
+# other projects may share it (skip with --no-searxng).
+ensure_searxng() {
+  if [[ "$USE_SEARXNG" != "1" ]]; then
+    echo "SearXNG skipped (--no-searxng); web search falls back to Bing."
+    return 0
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "WARNING: docker not found; skipping SearXNG (web search falls back to Bing)."
+    return 0
+  fi
+  if ! docker ps -a --format '{{.Names}}' | grep -qx "$SEARXNG_CONTAINER"; then
+    echo "Creating SearXNG container ($SEARXNG_CONTAINER)..."
+    docker run -d --name "$SEARXNG_CONTAINER" --network host --restart unless-stopped \
+      -e SEARXNG_PORT=8888 -e FORCE_OWNERSHIP=false \
+      -v "$SEARXNG_HOME/config:/etc/searxng" \
+      -v "$SEARXNG_HOME/data:/var/cache/searxng" \
+      "$SEARXNG_IMAGE" >/dev/null
+  elif [[ "$(docker inspect -f '{{.State.Running}}' "$SEARXNG_CONTAINER" 2>/dev/null)" != "true" ]]; then
+    echo "Starting SearXNG container ($SEARXNG_CONTAINER)..."
+    docker start "$SEARXNG_CONTAINER" >/dev/null
+  fi
+  for _ in $(seq 1 60); do
+    if (exec 3<>/dev/tcp/127.0.0.1/8888) 2>/dev/null; then
+      exec 3>&- 2>/dev/null || true
+      echo "SearXNG up on http://127.0.0.1:8888"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "WARNING: SearXNG did not open :8888 in time (web search falls back to Bing)."
+}
+
 COMMON=(
   --thresh 0.5 --min_speech_ms 300 --min_silence_ms 400
   --stt paraformer --paraformer_stt_device cpu
@@ -182,6 +228,8 @@ fi
 
 mkdir -p "$S2S_HOME/logs"
 export SPEECH_TO_SPEECH_URL="ws://localhost:$PORT/v1/realtime"
+
+ensure_searxng
 
 speech-to-speech serve --host "$HOST" --port "$PORT" "${COMMON[@]}" \
   > "$S2S_HOME/logs/backend_realtime.log" 2>&1 &

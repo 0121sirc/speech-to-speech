@@ -5,9 +5,9 @@ The demo used to ship as a `sdk: static` Space, but the web-search tool needs a
 search backend the browser must NOT talk to directly. A static Space has no
 runtime process, so it can't hold a secret or proxy anything. This server fixes
 that: it serves the unchanged front-end AND exposes a same-origin `/api/search`
-proxy. Search works out of the box by scraping Bing (no key, no registration);
-when a Serper key is configured — or a user supplies one — it uses Serper instead
-(see docs/adr/0001).
+proxy. Search works out of the box via a self-hosted SearXNG instance (no key,
+no registration), falling back to a direct Bing scrape; when a Serper key is
+configured — or a user supplies one — it uses Serper instead (see docs/adr/0001).
 
 Everything lives in one container; the speech-to-speech backend stays a separate,
 load-balanced service the browser talks to over WebSocket as before. The load
@@ -27,7 +27,7 @@ browser connects directly to that URL, shown read-only in Settings.
 Endpoints:
   GET  /api/config           -> { search, searchKey, lb, allowDirect, s2sUrl, rtc, iceServers, auth }
   GET  /api/me               -> login + tier + remaining budget (LB mode only)
-  POST /api/search           -> { results, answer }  Bing (keyless) or Google via Serper.dev
+  POST /api/search           -> { results, answer }  SearXNG (keyless) or Bing or Google via Serper.dev
   POST /api/calls            -> proxies the WebRTC SDP offer to <s2s>/v1/realtime/calls
   POST /api/session          -> proxies <LB>/session: a grant, or a queue ticket
   GET  /api/queue/{id}       -> proxies <LB>/queue/{id}: position, or a grant on claim
@@ -133,6 +133,10 @@ def _webrtc_calls_url(s2s_url: str) -> str:
 
 
 SERPER_URL = "https://google.serper.dev/search"
+# Self-hosted SearXNG instance (Docker, --network host). Primary keyless search
+# backend: aggregates baidu/quark/sogou/360/bing/duckduckgo/... over the local
+# proxy, so Chinese queries get proper results without a third-party key.
+SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://127.0.0.1:8888").rstrip("/")
 # Keyless fallback: Bing's HTML endpoint (no API key, no registration). The
 # Chinese endpoint is reachable directly from residential IPs (the main site is
 # not reliably reachable behind some networks).
@@ -268,6 +272,54 @@ async def _serper_search(query: str, key: str) -> dict:
     return {"query": query, "answer": answer, "results": results}
 
 
+async def _searxng_search(query: str) -> dict:
+    """Keyless web search via the self-hosted SearXNG JSON API.
+
+    The local instance aggregates baidu/quark/sogou/360/bing/duckduckgo/... (all
+    outbound via the proxy), so Chinese queries get proper results without a
+    third-party key. Returns the same ``{query, answer, results}`` shape as the
+    other backends; raises so the caller can fall back."""
+    params = {"q": query, "format": "json", "language": "zh-CN", "safesearch": 0}
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            resp = await http.get(f"{SEARXNG_URL}/search", params=params)
+    except httpx.RequestError as exc:
+        logger.warning("SearXNG unreachable for %r: %s", query, exc)
+        raise HTTPException(status_code=502, detail="Search provider unreachable.")
+
+    if resp.status_code != 200:
+        logger.warning("SearXNG returned HTTP %d for %r", resp.status_code, query)
+        raise HTTPException(status_code=502, detail=f"Search provider error ({resp.status_code}).")
+
+    data = resp.json()
+    results = []
+    for item in (data.get("results") or [])[:MAX_RESULTS]:
+        if not item.get("url"):
+            continue
+        results.append(
+            {
+                "title": item.get("title", ""),
+                "snippet": item.get("content", ""),
+                "url": item.get("url", ""),
+            }
+        )
+
+    # A direct answer / infobox when SearXNG has one — saves the model a hop.
+    answer = None
+    answers = [a for a in (data.get("answers") or []) if a]
+    if answers:
+        answer = "; ".join(answers)[:300]
+    else:
+        infobox = (data.get("infoboxes") or [None])[0]
+        if infobox:
+            text = infobox.get("content") or infobox.get("description") or ""
+            if not text and infobox.get("attributes"):
+                text = " ".join(str(a.get("value", "")) for a in infobox.get("attributes", []))
+            answer = text[:300] or infobox.get("title")
+
+    return {"query": query, "answer": answer, "results": results}
+
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 LB_USER_AGENT = "speech-to-speech-demo"
 
@@ -377,14 +429,21 @@ async def me(request: Request):
 async def search(req: SearchRequest):
     """Proxy a web search. Uses Serper.dev when a key is available (the server's,
     or the user's — theirs for this request only); otherwise searches keyless via
-    Bing, so web search works with no configuration at all."""
+    the local SearXNG instance, falling back to a direct Bing scrape if SearXNG
+    is unavailable, so web search works with no configuration at all."""
     query = (req.query or "").strip()
     if not query:
         raise HTTPException(status_code=400, detail="Empty query.")
 
     key = (req.key or "").strip() or SERPER_KEY
-    data = await _serper_search(query, key) if key else await _bing_search(query)
-    return JSONResponse(data)
+    if key:
+        return JSONResponse(await _serper_search(query, key))
+
+    try:
+        return JSONResponse(await _searxng_search(query))
+    except HTTPException:
+        # SearXNG down / erroring: keep search alive with the Bing scrape.
+        return JSONResponse(await _bing_search(query))
 
 
 @app.post("/api/calls")
