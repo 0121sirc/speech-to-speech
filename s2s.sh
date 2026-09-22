@@ -3,7 +3,7 @@
 # Usage: s2s.sh [start [OPTIONS]] | stop
 set -euo pipefail
 
-export S2S_HOME="${S2S_HOME:-/media/kg/DEV4T/s2s}"
+export S2S_HOME="${S2S_HOME:-/media/kg/DEV4T/github/s2s}"
 
 MODE="web"
 API_URL=""
@@ -17,8 +17,8 @@ USE_SEARXNG=1
 
 # Self-hosted SearXNG (shared across projects; started on demand, left running
 # on `stop` so other consumers keep working).
-SEARXNG_HOME="${SEARXNG_HOME:-/media/kg/DEV4T/searxng}"
-SEARXNG_CONTAINER="s2s-searxng"
+SEARXNG_HOME="${SEARXNG_HOME:-/media/kg/DEV4T/gitee/searxng}"
+SEARXNG_CONTAINER="searxng"
 SEARXNG_IMAGE="ghcr.nju.edu.cn/searxng/searxng:latest"
 
 usage() {
@@ -157,6 +157,14 @@ export HF_HOME="$S2S_HOME/hf_cache"
 export HF_HUB_CACHE="$S2S_HOME/hf_cache/hub"
 export HF_ENDPOINT=https://huggingface.co
 export MODELSCOPE_CACHE="$S2S_HOME/modelscope_cache"
+# NLTK data (punkt_tab / averaged_perceptron_tagger_eng) vendored inside the
+# project so sentence splitting never depends on a download at runtime.
+export NLTK_DATA="$S2S_HOME/nltk_data"
+# Trust the CA bundle shipped with the env: urllib/NLTK otherwise reject the
+# local proxy's certificate chain and `nltk.download` fails silently.
+export SSL_CERT_FILE="$S2S_HOME/.conda_env/lib/python3.12/site-packages/certifi/cacert.pem"
+export REQUESTS_CA_BUNDLE="$SSL_CERT_FILE"
+export CURL_CA_BUNDLE="$SSL_CERT_FILE"
 # proxy for downloads (skip when --no-proxy)
 if [[ "$USE_PROXY" == "1" ]]; then
   export http_proxy=http://127.0.0.1:7897/

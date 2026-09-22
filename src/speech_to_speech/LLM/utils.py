@@ -96,6 +96,22 @@ def _has_unclosed_markdown_fence(text: str) -> bool:
     return opening_ticks is not None
 
 
+# Fallback splitter used when the NLTK punkt data is unavailable. Splits after
+# sentence-ending punctuation (Latin and CJK) without consuming it.
+FALLBACK_SENTENCE_SPLIT_PATTERN = re.compile(r"(?<=[.!?。！？])\s*")
+
+
+def _fallback_sentence_split(text: str) -> list[str]:
+    """Split text on sentence-ending punctuation, keeping the delimiter.
+
+    NLTK raises ``LookupError`` when its ``punkt_tab`` resource is missing; this
+    keeps sentence chunking (and therefore TTS streaming) working regardless.
+    """
+    sentences = [sentence.strip() for sentence in FALLBACK_SENTENCE_SPLIT_PATTERN.split(text)]
+    sentences = [sentence for sentence in sentences if sentence]
+    return sentences or [text]
+
+
 def sent_tokenize_preserving_markdown_code(
     text: str,
     tokenizer: Callable[[str], list[str]],
@@ -105,9 +121,13 @@ def sent_tokenize_preserving_markdown_code(
         return [text]
     protected_text, protected_code = _protect_markdown_code(text, keep_delimiters=True)
     protected_text, protected_emphasis = _protect_matched_emphasis(protected_text)
+    try:
+        sentences = tokenizer(protected_text)
+    except LookupError:
+        sentences = _fallback_sentence_split(protected_text)
     return [
         _restore_markdown_code(_restore_matched_emphasis(sentence, protected_emphasis), protected_code)
-        for sentence in tokenizer(protected_text)
+        for sentence in sentences
     ]
 
 

@@ -55,15 +55,25 @@ from speech_to_speech.STT.transcription_notifier import TranscriptionNotifier
 from speech_to_speech.utils.thread_manager import ThreadManager
 from speech_to_speech.VAD.vad_handler import VADHandler
 
-# Ensure that the necessary NLTK resources are available
-try:
-    nltk.data.find("tokenizers/punkt_tab")
-except (LookupError, OSError):
-    nltk.download("punkt_tab")
-try:
-    nltk.data.find("tokenizers/averaged_perceptron_tagger_eng")
-except (LookupError, OSError):
-    nltk.download("averaged_perceptron_tagger_eng")
+# Ensure that the necessary NLTK resources are available. They are vendored
+# under $NLTK_DATA; a missing resource degrades sentence splitting but must
+# never take the pipeline down, so failures here only warn.
+for _nltk_resource, _nltk_name in (
+    ("tokenizers/punkt_tab", "punkt_tab"),
+    ("tokenizers/averaged_perceptron_tagger_eng", "averaged_perceptron_tagger_eng"),
+):
+    try:
+        nltk.data.find(_nltk_resource)
+    except (LookupError, OSError):
+        try:
+            if not nltk.download(_nltk_name):
+                print(
+                    f"WARNING: NLTK resource {_nltk_name!r} is missing and could not be "
+                    "downloaded; sentence splitting will use the built-in fallback.",
+                    flush=True,
+                )
+        except Exception as exc:  # noqa: BLE001 - startup must not fail here
+            print(f"WARNING: NLTK download for {_nltk_name!r} failed: {exc}", flush=True)
 
 # caching allows ~50% compilation time reduction
 # see https://docs.google.com/document/d/1y5CRfMLdwEoF1nTk9q8qEu1mgMUuUtvhklPKJ2emLU8/edit#heading=h.o2asbxsrp1ma
