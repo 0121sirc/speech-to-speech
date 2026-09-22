@@ -15,6 +15,14 @@ WEB_PORT=7860
 USE_PROXY=1
 USE_SEARXNG=1
 
+# Optional external OpenAI-compatible TTS base URL (must include /v1, e.g.
+# http://127.0.0.1:8091/v1). Empty -> built-in Qwen3-TTS. When set and usable,
+# the pipeline switches to `--tts openai`; if the probe fails we warn and fall
+# back to the built-in Qwen3-TTS.
+TTS_URL=""
+OPENAI_TTS_VOICE="seed:1688"
+TTS_MODE="qwen3"
+
 # Self-hosted SearXNG (shared across projects; started on demand, left running
 # on `stop` so other consumers keep working).
 SEARXNG_HOME="${SEARXNG_HOME:-/media/kg/DEV4T/gitee/searxng}"
@@ -26,7 +34,11 @@ usage() {
 Usage: s2s.sh [start [OPTIONS]] | stop
 
 Unified launcher for the local voice assistant
-(Silero VAD -> Paraformer STT(zh) -> OpenAI-compatible LLM -> Qwen3-TTS).
+(Silero VAD -> Paraformer STT(zh) -> OpenAI-compatible LLM -> TTS).
+
+TTS defaults to the built-in Qwen3-TTS. Pass --tts-url to use any external
+OpenAI-compatible TTS server (e.g. the ChatTTS service in ChatTTS_colab)
+instead; an unusable URL warns and falls back to Qwen3-TTS.
 
 Commands:
   start [OPTIONS]   Start the assistant (default when the first arg is an option)
@@ -48,10 +60,15 @@ Options (for start):
   --no-proxy      do not set the http/https proxy (default proxy: 127.0.0.1:7897)
   --no-searxng    do not start the shared SearXNG container (web search then
                   falls back to Bing scraping; default: started on :8888)
+  --tts-url URL   external OpenAI-compatible TTS base URL, including /v1
+                  (e.g. http://127.0.0.1:8091/v1 for ChatTTS). Default: built-in
+                  Qwen3-TTS. An unusable URL warns and falls back to Qwen3-TTS.
   -h, --help      show this help
 
 Examples:
   ./s2s.sh start --api-url http://100.120.234.5:1234/v1/ --api-key 1234
+  ./s2s.sh start --api-url http://100.120.234.5:1234/v1/ --api-key 1234 \
+    --tts-url http://127.0.0.1:8091/v1
   ./s2s.sh --mode local --api-url http://100.120.234.5:1234/v1/ --api-key 1234
   ./s2s.sh stop
 EOF
@@ -133,6 +150,7 @@ while [[ $# -gt 0 ]]; do
     --host)      HOST="$2"; shift 2 ;;
     --port)      PORT="$2"; shift 2 ;;
     --web-port)  WEB_PORT="$2"; shift 2 ;;
+    --tts-url)   TTS_URL="$2"; shift 2 ;;
     --no-proxy)  USE_PROXY=0; shift ;;
     --no-searxng) USE_SEARXNG=0; shift ;;
     -h|--help)   usage; exit 0 ;;
@@ -169,6 +187,9 @@ export CURL_CA_BUNDLE="$SSL_CERT_FILE"
 if [[ "$USE_PROXY" == "1" ]]; then
   export http_proxy=http://127.0.0.1:7897/
   export https_proxy=http://127.0.0.1:7897/
+  # Keep localhost service calls (SearXNG, external local TTS) off the proxy.
+  export no_proxy="127.0.0.1,localhost,${no_proxy:-}"
+  export NO_PROXY="$no_proxy"
 fi
 
 echo "s2s env ready: $(which python)"
@@ -209,15 +230,68 @@ ensure_searxng() {
   echo "WARNING: SearXNG did not open :8888 in time (web search falls back to Bing)."
 }
 
+# ── External TTS (--tts-url) ───────────────────────────────────────────────
+# Probe the endpoint with a tiny synthesis request; only a 2xx with audio bytes
+# counts as usable. On failure, warn and fall back to the built-in Qwen3-TTS so
+# a mistyped/offline URL never blocks startup.
+ensure_tts_url() {
+  TTS_MODE="qwen3"
+  if [[ -z "$TTS_URL" ]]; then
+    return 0
+  fi
+
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "WARNING: curl not found; cannot verify --tts-url. Falling back to built-in Qwen3-TTS." >&2
+    TTS_URL=""
+    return 0
+  fi
+
+  local probe_url="${TTS_URL%/}/audio/speech"
+  local probe_out http_code size
+  probe_out="$(mktemp)"
+  http_code="$(curl -sS --max-time 15 --noproxy '*' -o "$probe_out" -w '%{http_code}' \
+    -X POST "$probe_url" -H 'Content-Type: application/json' \
+    -d "{\"input\":\"你好\",\"voice\":\"$OPENAI_TTS_VOICE\",\"response_format\":\"pcm\"}" 2>/dev/null || true)"
+  size="$(stat -c%s "$probe_out" 2>/dev/null || echo 0)"
+  rm -f "$probe_out"
+
+  if [[ "$http_code" == "200" && "$size" -gt 0 ]]; then
+    TTS_MODE="openai"
+    echo "TTS: using external OpenAI-compatible endpoint $TTS_URL"
+  else
+    echo "WARNING: --tts-url '$TTS_URL' is not usable (http=${http_code:-none}, bytes=${size}); falling back to built-in Qwen3-TTS." >&2
+    TTS_URL=""
+  fi
+}
+
+ensure_tts_url
+export TTS_URL
+
+TTS_ARGS=()
+if [[ "$TTS_MODE" == "openai" ]]; then
+  TTS_ARGS=(
+    --tts openai
+    --openai_tts_base_url "$TTS_URL"
+    --openai_tts_model chattts
+    --openai_tts_voice "$OPENAI_TTS_VOICE"
+    --openai_tts_response_format pcm
+    --openai_tts_sample_rate 24000
+  )
+else
+  TTS_ARGS=(
+    --tts qwen3
+    --qwen3_tts_backend ggml
+    --qwen3_tts_ggml_quantization Q8_0
+    --qwen3_tts_gguf_talker_path "$S2S_HOME/models/qwen-talker-1.7b-customvoice-Q8_0.gguf"
+    --qwen3_tts_gguf_codec_path "$S2S_HOME/models/qwen-tokenizer-12hz-Q8_0.gguf"
+  )
+fi
+
 COMMON=(
   --thresh 0.5 --min_speech_ms 300 --min_silence_ms 400
   --stt paraformer --paraformer_stt_device cpu
   --llm_backend responses-api
-  --tts qwen3
-  --qwen3_tts_backend ggml
-  --qwen3_tts_ggml_quantization Q8_0
-  --qwen3_tts_gguf_talker_path "$S2S_HOME/models/qwen-talker-1.7b-customvoice-Q8_0.gguf"
-  --qwen3_tts_gguf_codec_path "$S2S_HOME/models/qwen-tokenizer-12hz-Q8_0.gguf"
+  "${TTS_ARGS[@]}"
   --model_name "$MODEL"
   --responses_api_base_url "$API_URL"
   --responses_api_api_key "$API_KEY"

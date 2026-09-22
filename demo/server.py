@@ -137,6 +137,10 @@ SERPER_URL = "https://google.serper.dev/search"
 # backend: aggregates baidu/quark/sogou/360/bing/duckduckgo/... over the local
 # proxy, so Chinese queries get proper results without a third-party key.
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://127.0.0.1:8888").rstrip("/")
+# External OpenAI-compatible TTS base URL (s2s.sh --tts-url). Empty means the
+# built-in Qwen3-TTS. Only used to expose the available voice list to the UI.
+TTS_URL = os.environ.get("TTS_URL", "").strip().rstrip("/")
+QWEN3_VOICES = ["Aiden", "Ryan", "Dylan", "Eric", "Ono_Anna", "Serena", "Sohee", "Uncle_Fu", "Vivian"]
 # Keyless fallback: Bing's HTML endpoint (no API key, no registration). The
 # Chinese endpoint is reachable directly from residential IPs (the main site is
 # not reliably reachable behind some networks).
@@ -397,7 +401,35 @@ def config():
         "iceServers": RTC_ICE_SERVERS,
         "startupGreeting": STARTUP_GREETING,
         "auth": AUTH_ENABLED,
+        # External TTS base URL when s2s.sh was started with --tts-url (empty
+        # means the built-in Qwen3-TTS). Drives the voice picker in the UI.
+        "ttsUrl": TTS_URL,
     }
+
+
+@app.get("/api/voices")
+async def tts_voices():
+    """Voice list for the active TTS backend.
+
+    With an external OpenAI-compatible TTS (``--tts-url``), proxy its
+    ``/audio/voices`` so the UI lists the real ChatTTS voices and knows the seed
+    control applies (``backend="chattts"``). Otherwise report Qwen3-TTS voices.
+    A reachable URL that exposes no voices list returns ``backend=null`` so the
+    UI keeps the selector but flags the seed box as ChatTTS-only.
+    """
+    if not TTS_URL:
+        return {"backend": "qwen3", "voices": QWEN3_VOICES, "default": None}
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as http:
+            resp = await http.get(f"{TTS_URL}/audio/voices")
+        if resp.status_code == 200:
+            data = resp.json()
+            voices = [v for v in (data.get("voices") or []) if isinstance(v, str) and v]
+            if voices:
+                return {"backend": "chattts", "voices": voices, "default": data.get("default")}
+    except httpx.RequestError as exc:
+        logger.warning("TTS voices unavailable at %s: %r", TTS_URL, exc)
+    return {"backend": None, "voices": QWEN3_VOICES, "default": None}
 
 
 @app.get("/api/me")

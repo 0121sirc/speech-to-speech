@@ -24,12 +24,17 @@ import { Account } from "./ui/account.js";
 
 const DEFAULT_VOICE = "Aiden";
 const DEFAULT_INSTRUCTIONS = "You are a friendly voice assistant.";
+// Sentinel <option> value for "type a seed yourself". The effective voice is
+// then sent as `seed:<n>`, understood by the ChatTTS OpenAI-compatible server.
+const VOICE_SEED_OPTION = "__seed__";
+const DEFAULT_CHATTTS_SEED = 1688;
 
 const STORAGE_KEYS = {
   // Direct s2s server URL, used only when the deploy has no LOAD_BALANCER_URL
   // (in LB mode the browser never learns the LB address — it POSTs /api/session).
   directUrl: "s2s.ws.directUrl",
   voice: "s2s.ws.voice",
+  chatttsSeed: "s2s.chattts.seed",
   instructions: "s2s.ws.instructions",
   tools: "s2s.ws.tools",
   searchKey: "s2s.ws.searchKey",
@@ -111,6 +116,7 @@ function loadSettings() {
   return {
     directUrl: localStorage.getItem(STORAGE_KEYS.directUrl) || "",
     voice: localStorage.getItem(STORAGE_KEYS.voice) || DEFAULT_VOICE,
+    chatttsSeed: loadChatttsSeed(),
     instructions: localStorage.getItem(STORAGE_KEYS.instructions) || DEFAULT_INSTRUCTIONS,
     noiseGate: loadGateThreshold(),
     // Default WebSocket: the proven path stays the first-run experience.
@@ -119,6 +125,15 @@ function loadSettings() {
     audioOutputId: localStorage.getItem(STORAGE_KEYS.audioOutputId) || "",
     volume: loadVolume(),
   };
+}
+
+/** ChatTTS fixed-speaker seed. Any non-negative integer; default 1688. */
+function loadChatttsSeed() {
+  const stored = localStorage.getItem(STORAGE_KEYS.chatttsSeed);
+  if (stored === null || stored === "") return DEFAULT_CHATTTS_SEED;
+  const raw = Number(stored);
+  if (!Number.isFinite(raw) || raw < 0) return DEFAULT_CHATTTS_SEED;
+  return Math.floor(raw);
 }
 
 /** Assistant playback volume in percent (0–300). Default 100. */
@@ -147,6 +162,7 @@ function loadGateThreshold() {
 function saveSettings(s) {
   localStorage.setItem(STORAGE_KEYS.directUrl, s.directUrl);
   localStorage.setItem(STORAGE_KEYS.voice, s.voice);
+  localStorage.setItem(STORAGE_KEYS.chatttsSeed, String(s.chatttsSeed));
   localStorage.setItem(STORAGE_KEYS.instructions, s.instructions);
   localStorage.setItem(STORAGE_KEYS.noiseGate, String(s.noiseGate));
   localStorage.setItem(STORAGE_KEYS.transport, s.transport);
@@ -275,6 +291,15 @@ const transportHint = $("#transport-hint");
 const gateField = $("#gate-field");
 /** @type {HTMLSelectElement} */
 const inputVoice = $("#voice");
+/** @type {HTMLElement} */
+const chatttsSeedField = $("#chattts-seed-field");
+/** @type {HTMLInputElement} */
+const inputChatttsSeed = $("#chattts-seed");
+/** @type {HTMLElement} */
+const chatttsSeedHint = $("#chattts-seed-hint");
+// Active TTS backend, learned from /api/voices: "qwen3", "chattts", or null
+// (external TTS of unknown type). Controls the voice options + seed control.
+let ttsBackend = "qwen3";
 /** @type {HTMLSelectElement} */
 const inputAudioInput = $("#audio-input");
 /** @type {HTMLSelectElement} */
@@ -484,9 +509,33 @@ function setCaption(text, kind = "") {
   circleCaption.className = `circle-caption${kind ? ` ${kind}` : ""}${trimmed ? "" : " empty"}`;
 }
 
+/** Reflect a stored voice string in the form: select the matching option, or
+ *  the "Custom Seed" option when it is a `seed:<n>` value. A voice saved for a
+ *  different TTS backend is not offered here, so fall back to a valid option
+ *  (seed first) instead of leaving the select empty. @param {string} voice */
+function applyVoiceToForm(voice) {
+  const hasOption = (value) => [...inputVoice.options].some((o) => o.value === value);
+  if (voice.startsWith("seed:") && hasOption(VOICE_SEED_OPTION)) {
+    inputVoice.value = VOICE_SEED_OPTION;
+    const n = Number(voice.slice(5));
+    if (Number.isFinite(n) && n >= 0) inputChatttsSeed.value = String(Math.floor(n));
+    return;
+  }
+  if (!voice.startsWith("seed:") && hasOption(voice)) {
+    inputVoice.value = voice;
+    return;
+  }
+  if (hasOption(VOICE_SEED_OPTION)) {
+    inputVoice.value = VOICE_SEED_OPTION;
+  } else if (inputVoice.options.length) {
+    inputVoice.value = inputVoice.options[0].value;
+  }
+}
+
 function openSettings() {
   syncConnectionUi();
-  inputVoice.value = settings.voice;
+  applyVoiceToForm(settings.voice);
+  inputChatttsSeed.value = String(settings.chatttsSeed);
   inputInstructions.value = settings.instructions;
   syncGateUi();
   updateRestartAvailability();
@@ -917,6 +966,71 @@ async function execWebSearch(query) {
   return lines.length > 1 ? lines.join("\n") : `${lines[0]}\nNo results found.`;
 }
 
+/** Show/hide the ChatTTS seed field per the detected backend. */
+function updateSeedField() {
+  if (ttsBackend === "qwen3") {
+    chatttsSeedField.hidden = true;
+    return;
+  }
+  chatttsSeedField.hidden = false;
+  chatttsSeedHint.textContent =
+    ttsBackend === "chattts"
+      ? "Fixed-speaker seed, used when Voice is “Custom Seed”."
+      : "Only applies to the ChatTTS backend.";
+}
+
+/** Populate the voice picker for the active TTS backend (/api/voices). The
+ *  seed option is offered whenever an external TTS is in play; when the backend
+ *  can't be detected the field stays visible with a ChatTTS-only note. */
+async function loadVoices() {
+  let data = null;
+  try {
+    const res = await fetch("api/voices");
+    if (res.ok) data = await res.json();
+  } catch {
+    data = null;
+  }
+  if (!data) {
+    ttsBackend = null;
+    updateSeedField();
+    return;
+  }
+
+  ttsBackend = data.backend === "chattts" || data.backend === "qwen3" ? data.backend : null;
+  const names = Array.isArray(data.voices) ? data.voices.filter((v) => typeof v === "string" && v) : [];
+  const options = [];
+  if (ttsBackend !== "qwen3") options.push({ value: VOICE_SEED_OPTION, label: "Custom Seed" });
+  for (const name of names) options.push({ value: name, label: name });
+  if (options.length) {
+    inputVoice.replaceChildren(
+      ...options.map(({ value, label }) => {
+        const opt = document.createElement("option");
+        opt.value = value;
+        opt.textContent = label;
+        return opt;
+      }),
+    );
+    // A voice saved for a different backend isn't valid here: fall back to the
+    // seed option (ChatTTS) or the first listed voice, and persist the change so
+    // the live session never sends an unsupported voice.
+    const valid = new Set(options.map((o) => o.value));
+    let desired = settings.voice;
+    if (desired.startsWith("seed:")) {
+      if (!valid.has(VOICE_SEED_OPTION)) desired = names[0] || DEFAULT_VOICE;
+    } else if (!valid.has(desired)) {
+      desired = valid.has(VOICE_SEED_OPTION)
+        ? `seed:${settings.chatttsSeed || DEFAULT_CHATTTS_SEED}`
+        : names[0] || DEFAULT_VOICE;
+    }
+    if (desired !== settings.voice) {
+      settings.voice = desired;
+      saveSettings(settings);
+    }
+    applyVoiceToForm(desired);
+  }
+  updateSeedField();
+}
+
 /** Learn server config (search key + connection target), then refresh the UI. */
 async function fetchConfig() {
   try {
@@ -949,6 +1063,7 @@ async function fetchConfig() {
   void account.refresh();
   syncToolsUi();
   syncConnectionUi();
+  void loadVoices();
 }
 
 /**
@@ -1011,6 +1126,20 @@ function createResumedAudioContext() {
   }
 }
 
+/** Seed currently shown in the ChatTTS seed box, clamped to >= 0. */
+function readChatttsSeed() {
+  const raw = Math.floor(Number(inputChatttsSeed.value));
+  if (!Number.isFinite(raw) || raw < 0) return settings.chatttsSeed || DEFAULT_CHATTTS_SEED;
+  return raw;
+}
+
+/** Effective voice sent to the backend: `seed:<n>` for the Custom Seed option,
+ *  otherwise the selected voice name. */
+function readSelectedVoice() {
+  if (inputVoice.value === VOICE_SEED_OPTION) return `seed:${readChatttsSeed()}`;
+  return inputVoice.value || DEFAULT_VOICE;
+}
+
 /** Read the editable settings out of the form. The URL field is only honoured
  *  in free direct mode — in LB mode it's hidden, and when the deploy pins a
  *  URL it's read-only, so the user's saved URL survives either way. The
@@ -1019,7 +1148,8 @@ function createResumedAudioContext() {
 function readSettingsFromForm() {
   return {
     directUrl: allowDirect && !pinnedUrl ? inputLbUrl.value.trim() : settings.directUrl,
-    voice: inputVoice.value || DEFAULT_VOICE,
+    voice: readSelectedVoice(),
+    chatttsSeed: readChatttsSeed(),
     instructions: inputInstructions.value.trim() || DEFAULT_INSTRUCTIONS,
     noiseGate: readGateThreshold(),
     transport: /** @type {"ws" | "webrtc"} */ (
