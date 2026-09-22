@@ -41,7 +41,7 @@ from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn, build_comp
 from speech_to_speech.LLM.text_prompt import build_text_system_prompt
 from speech_to_speech.LLM.utils import (
     language_name_for_prompt,
-    remove_markdown,
+    remove_markdown_for_tts,
     remove_unspeechable,
     resolve_auto_language,
     sent_tokenize_preserving_markdown_code,
@@ -624,7 +624,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             elif isinstance(event, ToolCall):
                 # Flush any pending spoken text before emitting the tool call.
                 if printable_text.strip():
-                    sentence_batch.append(remove_markdown(printable_text.strip()))
+                    sentence_batch.append(remove_markdown_for_tts(printable_text.strip()))
                     printable_text = ""
                 if sentence_batch:
                     if not self._turn_output_allowed(turn.turn_id, turn.turn_revision):
@@ -655,7 +655,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 sentences = sent_tokenize_preserving_markdown_code(printable_text, sent_tokenize)
                 if len(sentences) > 1:
                     for s in sentences[:-1]:
-                        sentence_batch.append(remove_markdown(s))
+                        sentence_batch.append(remove_markdown_for_tts(s))
                         if len(sentence_batch) >= self.stream_batch_sentences:
                             if not self._turn_output_allowed(turn.turn_id, turn.turn_revision):
                                 logger.info("LLM generation cancelled (stale speculative turn)")
@@ -669,7 +669,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
         if not cancelled:
             if printable_text.strip():
-                sentence_batch.append(remove_markdown(printable_text.strip()))
+                sentence_batch.append(remove_markdown_for_tts(printable_text.strip()))
             if sentence_batch:
                 if self._turn_is_cancelled(turn):
                     logger.info("LLM generation cancelled (interruption)")
@@ -710,7 +710,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 # Text-only keeps every character verbatim; audio strips markdown
                 # and TTS-unfriendly symbols. Not per-delta here: each TextDelta
                 # in the non-streaming path already carries the full response.
-                spoken = event.text if not turn.wants_audio else remove_markdown(remove_unspeechable(event.text))
+                spoken = event.text if not turn.wants_audio else remove_markdown_for_tts(remove_unspeechable(event.text))
                 state.clean_text += spoken
                 out = spoken if not turn.wants_audio else spoken.strip()
                 if (

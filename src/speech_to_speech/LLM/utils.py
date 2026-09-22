@@ -43,6 +43,19 @@ MARKDOWN_BOUNDARY_EMPHASIS_PATTERN = re.compile(
     r"(?P<body>\S(?:[^\n]*?\S)?)(?P=delimiter)(?![\w*_])"
 )
 
+# Multi-character emphasis (**bold**, __bold__) immediately next to a non-Latin
+# script (e.g. Chinese) has no whitespace boundary, so the conservative pattern
+# above rejects it. Allow non-ASCII neighbours for these longer runs only, which
+# leaves intraword ASCII operators untouched (x**y**z, 5**2, function__call).
+MARKDOWN_CJK_EMPHASIS_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9*_])(?P<delimiter>\*{2,3}|_{2})(?![*_])"
+    r"(?P<body>\S(?:[^\n]*?\S)?)(?P=delimiter)(?![A-Za-z0-9*_])"
+)
+
+# Stray delimiter runs that survive markdown stripping (an unmatched '**', or a
+# run butted against an ASCII letter). Swept only on the text headed to TTS.
+RESIDUAL_MARKDOWN_DELIMITER_PATTERN = re.compile(r"\*+|_{2,}")
+
 
 def _protect_markdown_code(text: str, *, keep_delimiters: bool) -> tuple[str, list[str]]:
     protected_code: list[str] = []
@@ -141,7 +154,23 @@ def remove_markdown(text: str) -> str:
     text = MARKDOWN_HEADING_PATTERN.sub("", text)
     text = MARKDOWN_BULLET_PATTERN.sub("", text)
     text = MARKDOWN_BOUNDARY_EMPHASIS_PATTERN.sub(r"\g<body>", text)
+    text = MARKDOWN_CJK_EMPHASIS_PATTERN.sub(r"\g<body>", text)
     return _restore_markdown_code(text, protected_code)
+
+
+def remove_residual_markdown_delimiters(text: str) -> str:
+    """Drop leftover emphasis delimiter runs so TTS never voices ``**``.
+
+    Safety net for delimiters ``remove_markdown`` intentionally keeps (unmatched
+    runs, intraword operators). Applied to the text headed to TTS only — never to
+    the transcript shown in the UI.
+    """
+    return RESIDUAL_MARKDOWN_DELIMITER_PATTERN.sub("", text)
+
+
+def remove_markdown_for_tts(text: str) -> str:
+    """``remove_markdown`` plus a residual-delimiter sweep for the TTS path."""
+    return remove_residual_markdown_delimiters(remove_markdown(text))
 
 
 def remove_unspeechable(text: str) -> str:

@@ -10,6 +10,7 @@ from nltk import sent_tokenize
 from speech_to_speech.LLM.utils import (
     WHISPER_LANGUAGE_TO_LLM_LANGUAGE,
     remove_markdown,
+    remove_markdown_for_tts,
     remove_unspeechable,
     resolve_auto_language,
     sent_tokenize_preserving_markdown_code,
@@ -191,6 +192,26 @@ def test_remove_markdown_does_not_pair_independent_compact_operators() -> None:
     assert remove_markdown("скорость*время*путь") == "скорость*время*путь"
     assert remove_markdown("α*β*γ") == "α*β*γ"
     assert remove_markdown("a*β*c") == "a*β*c"
+
+
+def test_remove_markdown_strips_bold_next_to_cjk() -> None:
+    # Chinese prose has no spaces, so bold runs sit directly against word
+    # characters; the conservative ASCII boundary must not block stripping.
+    assert remove_markdown("天气是**小雨转多云**，气温在**28至32**之间。") == "天气是小雨转多云，气温在28至32之间。"
+    assert remove_markdown("这是__下划线加粗__的文字") == "这是下划线加粗的文字"
+    assert remove_markdown("**开头加粗**结尾") == "开头加粗结尾"
+    # A single-star run next to CJK stays an operator (see the test above).
+    assert remove_markdown("力*質量*時間") == "力*質量*時間"
+
+
+def test_remove_markdown_for_tts_sweeps_residual_delimiters() -> None:
+    # remove_markdown keeps unmatched/intraword runs; the TTS sweep drops the
+    # asterisks so the synthesizer never voices them.
+    assert remove_markdown_for_tts("是**小雨**") == "是小雨"
+    assert remove_markdown_for_tts("残**留") == "残留"
+    assert remove_markdown_for_tts("test**word**") == "testword"
+    # Single underscores are left alone so snake_case stays readable.
+    assert remove_markdown_for_tts("function_call_output") == "function_call_output"
 
 
 def test_remove_markdown_preserves_unmatched_delimiters_and_operators() -> None:
