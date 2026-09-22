@@ -330,6 +330,22 @@ LB_USER_AGENT = "speech-to-speech-demo"
 app = FastAPI(title="s2s-demo")
 
 
+@app.middleware("http")
+async def _revalidate_static(request: Request, call_next):
+    """Force browsers to revalidate the app shell (index.html / JS / CSS).
+
+    StaticFiles sends only ETag/Last-Modified, so a cached main.js survives a
+    normal reload and the UI can run stale code after an update. ``no-cache``
+    keeps conditional requests (304 when unchanged) while guaranteeing the
+    browser always checks.
+    """
+    response = await call_next(request)
+    path = request.url.path
+    if path == "/" or path.endswith((".html", ".js", ".css")):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 @app.get("/vendor/openai-realtime-agents.umd.js", include_in_schema=False)
 def agents_sdk_bundle():
     """Serve the exact npm-pinned browser bundle without committing build output."""
